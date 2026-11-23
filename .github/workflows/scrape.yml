@@ -1,0 +1,30 @@
+name: Daily MI Lottery Top-Prize Scraper
+
+on:
+  schedule:
+    # Runs daily at 07:00 UTC (2:00 AM EST / 1:00 AM CST)
+    - cron: "0 7 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies and Chromium
+        run: |
+          npm ci --omit=dev || npm install --omit=dev
+          npx playwright install --with-deps chromium
+
+      - name: Run top-prize scraper in cloud
+        env:
+          APPS_SCRIPT_WEBHOOK_URL: ${{ secrets.APPS_SCRIPT_WEBHOOK_URL }}
+          APPS_SCRIPT_WEBHOOK_SECRET: ${{ secrets.APPS_SCRIPT_WEBHOOK_SECRET }}
+        run: node scrape.js
