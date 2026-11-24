@@ -1,30 +1,155 @@
-name: Daily MI Lottery Top-Prize Scraper
+import { chromium } from "playwright";
 
-on:
-  schedule:
-    # Runs daily at 07:00 UTC (2:00 AM EST / 1:00 AM CST)
-    - cron: "0 7 * * *"
-  workflow_dispatch: {}
+const TARGET_URL =
+  "https://www.michiganlottery.com/prizes-remaining?topPrizeStatus=AVAILABLE&ticketPrice=1000%2C2000%2C3000%2C5000&view=table&gameType=INSTANT";
 
-jobs:
-  scrape:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+const WEBHOOK_URL = process.env.APPS_SCRIPT_WEBHOOK_URL;
+const WEBHOOK_SECRET = process.env.APPS_SCRIPT_WEBHOOK_SECRET;
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
+function parseMoney(str) {
+  const n = Number(String(str || "").replace(/[^0-9.]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+}
 
-      - name: Install dependencies and Chromium
-        run: |
-          npm ci --omit=dev || npm install --omit=dev
-          npx playwright install --with-deps chromium
+function parseIntClean(str) {
+  const n = parseInt(String(str || "").replace(/[^0-9]/g, ""), 10);
+  return Number.isFinite(n) ? n : 0;
+}
 
-      - name: Run top-prize scraper in cloud
-        env:
-          APPS_SCRIPT_WEBHOOK_URL: ${{ secrets.APPS_SCRIPT_WEBHOOK_URL }}
-          APPS_SCRIPT_WEBHOOK_SECRET: ${{ secrets.APPS_SCRIPT_WEBHOOK_SECRET }}
-        run: node scrape.js
+async function run() {
+  if (!WEBHOOK_URL || !WEBHOOK_SECRET) {
+    throw new Error("Missing APPS_SCRIPT_WEBHOOK_URL or APPS_SCRIPT_WEBHOOK_SECRET");
+  }
+
+  const browser = await chromium.launch({
+    headless: true,
+    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+  });
+
+  const context = await browser.newContext({
+    userAgent:
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    viewport: { width: 1280, height: 800 }
+  });
+
+  const page = await context.newPage();
+  page.setDefaultTimeout(45000);
+
+  console.log("Navigating to Michigan Lottery page...");
+  await page.goto(TARGET_URL, { waitUntil: "domcontentloaded", timeout: 90000 });
+
+  // Wait for dynamic prize content to render rather than waiting for networkidle
+  await page.waitForSelector("table, [class*='game'], [class*='prize']", { timeout: 30000 }).catch(() => {
+    console.log("Selector wait finished without matching table/game/prize elements; checking page text.");
+  });
+  await page.waitForTimeout(5000);
+
+  console.log("Page title:", await page.title());
+  console.log("Final URL:", page.url());
+
+  const games = await page.evaluate(() => {
+    const items = [];
+    const tables = Array.from(document.querySelectorAll("table"));
+
+    for (const table of tables) {
+      const container =
+        table.closest("article, section, [class*='card'], [class*='game'], [class*='accordion']") ||
+        table.parentElement;
+      const containerText = container ? container.innerText : "";
+      const lines = containerText.split("\n").map(l => l.trim()).filter(Boolean);
+
+      const numMatch = containerText.match(/Game\s*(?:Number|#)\s*:?\s*(\d+)/i);
+      const priceMatch = containerText.match(/(?:Price\s*:?\s*)?\$(\d+(?:\.\d{2})?)/i);
+
+      const tiers = [];
+      for (const row of Array.from(table.querySelectorAll("tr"))) {
+        const cells = Array.from(row.querySelectorAll("th, td")).map(c => c.innerText.trim());
+        if (cells.length < 2) continue;
+        if (/total/i.test(cells.join(" "))) continue;
+
+        const prizeMatch = cells[0].match(/^\$?([\d,]+(?:\.\d{2})?)$/);
+        if (!prizeMatch) continue;
+
+        const prizeVal = Number(prizeMatch[1].replace(/,/g, ""));
+        const remVal = Number((cells[1] || "0").replace(/,/g, ""));
+        const startVal = Number((cells[2] || "0").replace(/,/g, ""));
+
+        if (Number.isFinite(prizeVal) && prizeVal > 0) {
+          tiers.push({
+            prize: prizeVal,
+            remaining: Number.isFinite(remVal) ? remVal : 0,
+            start: Number.isFinite(startVal) ? startVal : 0
+          });
+        }
+      }
+
+      if (tiers.length === 0) continue;
+
+      // Keep ONLY the highest prize tier per game
+      tiers.sort((a, b) => b.prize - a.prize);
+      const topTier = tiers[0];
+
+      const totalRowMatch = containerText.match(/TOTAL\s*:?\s*([\d,]+)/i);
+      const totalRemaining = totalRowMatch
+        ? Number(totalRowMatch[1].replace(/,/g, ""))
+        : tiers.reduce((sum, t) => sum + t.remaining, 0);
+
+      const gameName =
+        lines.find(
+          l =>
+            !/game\s*(number|#)|price|release|prize|remaining|start|total/i.test(l) &&
+            !/^\$/.test(l) &&
+            l.length > 1
+        ) || "";
+
+      items.push({
+        gameName,
+        gameNumber: numMatch ? numMatch[1] : "",
+        price: priceMatch ? priceMatch[1] : "",
+        topPrize: topTier.prize,
+        topRemaining: topTier.remaining,
+        topStart: topTier.start,
+        totalRemaining
+      });
+    }
+
+    const seen = new Set();
+    return items.filter(item => {
+      const key = item.gameNumber || `${item.gameName}|${item.topPrize}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  });
+
+  if (games.length === 0) {
+    const bodyPreview = await page.evaluate(() => (document.body?.innerText || "").slice(0, 1200));
+    console.log("0 games extracted. Body preview:\n", bodyPreview);
+  }
+
+  await browser.close();
+
+  const cleanGames = games.map(g => ({
+    gameName: String(g.gameName || "").trim(),
+    gameNumber: String(g.gameNumber || "").trim(),
+    price: parseMoney(g.price),
+    topPrize: parseMoney(g.topPrize),
+    topRemaining: parseIntClean(g.topRemaining),
+    topStart: parseIntClean(g.topStart),
+    totalRemaining: parseIntClean(g.totalRemaining)
+  }));
+
+  const res = await fetch(WEBHOOK_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token: WEBHOOK_SECRET, games: cleanGames })
+  });
+
+  const data = await res.json();
+  console.log("Extracted games:", cleanGames.length, "Webhook result:", data);
+}
+
+run().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
