@@ -63,26 +63,32 @@ async function run() {
 
       if (!gameName || !Number.isFinite(prizeVal) || prizeVal <= 0) continue;
 
-      const key = `${gameName}__${priceVal}`;
+      const cleanRem = Number.isFinite(remVal) ? remVal : 0;
+      const cleanStart = Number.isFinite(startVal) ? startVal : 0;
+      const cleanPrice = Number.isFinite(priceVal) ? priceVal : 0;
+
+      const key = `${gameName}__${cleanPrice}`;
       if (!byGame[key]) {
         byGame[key] = {
           gameName,
-          gameNumber: "", // New table view does not show Game Number
-          price: Number.isFinite(priceVal) ? priceVal : 0,
+          gameNumber: "",
+          price: cleanPrice,
           topPrize: prizeVal,
-          topRemaining: Number.isFinite(remVal) ? remVal : 0,
-          topStart: Number.isFinite(startVal) ? startVal : 0,
-          totalRemaining: Number.isFinite(remVal) ? remVal : 0
+          topRemaining: cleanRem,
+          topStart: cleanStart,
+          totalRemaining: cleanRem,
+          totalStarting: cleanStart
         };
       } else {
-        // Add remaining prizes from lower tiers into totalRemaining
-        byGame[key].totalRemaining += Number.isFinite(remVal) ? remVal : 0;
+        // Sum remaining and starting prizes across all tiers for this game
+        byGame[key].totalRemaining += cleanRem;
+        byGame[key].totalStarting += cleanStart;
 
         // Keep ONLY the highest prize tier as the top prize
         if (prizeVal > byGame[key].topPrize) {
           byGame[key].topPrize = prizeVal;
-          byGame[key].topRemaining = Number.isFinite(remVal) ? remVal : 0;
-          byGame[key].topStart = Number.isFinite(startVal) ? startVal : 0;
+          byGame[key].topRemaining = cleanRem;
+          byGame[key].topStart = cleanStart;
         }
       }
     }
@@ -99,7 +105,8 @@ async function run() {
     topPrize: parseMoney(g.topPrize),
     topRemaining: parseIntClean(g.topRemaining),
     topStart: parseIntClean(g.topStart),
-    totalRemaining: parseIntClean(g.totalRemaining)
+    totalRemaining: parseIntClean(g.totalRemaining),
+    totalStarting: parseIntClean(g.totalStarting)
   }));
 
   console.log("Extracted top-prize games:", cleanGames.length);
