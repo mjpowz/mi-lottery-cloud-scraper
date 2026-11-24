@@ -1,5 +1,6 @@
 import { chromium } from "playwright";
 
+const HOME_URL = "https://www.michiganlottery.com/";
 const TARGET_URL =
   "https://www.michiganlottery.com/prizes-remaining?topPrizeStatus=AVAILABLE&ticketPrice=1000%2C2000%2C3000%2C5000&view=table&gameType=INSTANT";
 
@@ -35,7 +36,39 @@ async function run() {
   const page = await context.newPage();
   page.setDefaultTimeout(45000);
 
-  console.log("Opening Michigan Lottery page...");
+  // 1. Scrape Fast Cash Jackpot from Michigan Lottery homepage
+  let fastCashJackpot = "";
+  try {
+    console.log("Opening Michigan Lottery homepage for Fast Cash jackpot...");
+    await page.goto(HOME_URL, { waitUntil: "domcontentloaded", timeout: 90000 });
+    await page.waitForTimeout(4000);
+
+    fastCashJackpot = await page.evaluate(() => {
+      const bodyText = document.body?.innerText || "";
+      // Match "Fast Cash" followed closely by a dollar amount (e.g., $1,234,567 or $450,000)
+      const directMatch = bodyText.match(/Fast\s*Cash[\s\S]{0,160}?(\$[\d,]+(?:\.\d{2})?)/i);
+      if (directMatch) return directMatch[1];
+
+      // Fallback: check elements containing "Fast Cash" and inspect their parent card
+      const candidates = Array.from(document.querySelectorAll("div, section, article, a, span, p, h1, h2, h3, h4"));
+      for (const el of candidates) {
+        if (/^fast\s*cash$/i.test((el.innerText || "").trim())) {
+          const card = el.closest("article, section, a, div") || el.parentElement;
+          const cardText = card ? card.innerText : "";
+          const m = cardText.match(/\$[\d,]+(?:\.\d{2})?/);
+          if (m) return m[0];
+        }
+      }
+      return "";
+    });
+
+    console.log("Fast Cash Jackpot extracted:", fastCashJackpot || "(none found)");
+  } catch (homeErr) {
+    console.warn("Warning: Could not scrape Fast Cash jackpot:", homeErr.message);
+  }
+
+  // 2. Scrape Instant Top Prizes table
+  console.log("Opening Michigan Lottery Prizes Remaining page...");
   await page.goto(TARGET_URL, { waitUntil: "domcontentloaded", timeout: 90000 });
 
   await page.waitForSelector("table tr", { timeout: 30000 });
@@ -47,7 +80,6 @@ async function run() {
 
     for (const row of rows) {
       const cells = Array.from(row.querySelectorAll("td")).map(c => c.innerText.trim());
-      // Expected columns: [Game, Ticket Price, Prize, Remaining, Starting, % Remaining]
       if (cells.length < 5) continue;
 
       const gameName = cells[0];
@@ -80,11 +112,9 @@ async function run() {
           totalStarting: cleanStart
         };
       } else {
-        // Sum remaining and starting prizes across all tiers for this game
         byGame[key].totalRemaining += cleanRem;
         byGame[key].totalStarting += cleanStart;
 
-        // Keep ONLY the highest prize tier as the top prize
         if (prizeVal > byGame[key].topPrize) {
           byGame[key].topPrize = prizeVal;
           byGame[key].topRemaining = cleanRem;
@@ -110,12 +140,15 @@ async function run() {
   }));
 
   console.log("Extracted top-prize games:", cleanGames.length);
-  console.log("Sample:", JSON.stringify(cleanGames.slice(0, 3), null, 2));
 
   const res = await fetch(WEBHOOK_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ token: WEBHOOK_SECRET, games: cleanGames })
+    body: JSON.stringify({
+      token: WEBHOOK_SECRET,
+      fastCashJackpot,
+      games: cleanGames
+    })
   });
 
   const data = await res.json();
