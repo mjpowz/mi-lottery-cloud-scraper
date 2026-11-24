@@ -2,8 +2,8 @@ name: Daily MI Lottery Top-Prize Scraper
 
 on:
   schedule:
-    # Runs daily at 07:00 UTC (2:00 AM EST / 1:00 AM CST)
-    - cron: "0 7 * * *"
+    # Runs daily at 07:17 UTC (2:17 AM EST)
+    - cron: "17 7 * * *"
   workflow_dispatch: {}
 
 jobs:
@@ -16,7 +16,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: Install dependencies and Chromium
         run: |
