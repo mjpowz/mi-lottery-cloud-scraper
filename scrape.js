@@ -21,12 +21,31 @@ async function run() {
     throw new Error("Missing APPS_SCRIPT_WEBHOOK_URL or APPS_SCRIPT_WEBHOOK_SECRET");
   }
 
-  const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage();
+  const browser = await chromium.launch({
+    headless: true,
+    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+  });
 
-  await page.goto(TARGET_URL, { waitUntil: "networkidle", timeout: 60000 });
-  await page.waitForSelector("table, [class*='game']", { timeout: 20000 }).catch(() => {});
-  await page.waitForTimeout(3000);
+  const context = await browser.newContext({
+    userAgent:
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    viewport: { width: 1280, height: 800 }
+  });
+
+  const page = await context.newPage();
+  page.setDefaultTimeout(45000);
+
+  console.log("Opening Michigan Lottery page...");
+  await page.goto(TARGET_URL, { waitUntil: "domcontentloaded", timeout: 90000 });
+
+  // Give JavaScript time to render the table instead of waiting for networkidle
+  await page.waitForSelector("table, [class*='game'], [class*='prize']", { timeout: 25000 }).catch(() => {
+    console.log("Did not immediately see table/game/prize elements; waiting a few more seconds.");
+  });
+  await page.waitForTimeout(5000);
+
+  console.log("Page title:", await page.title());
+  console.log("Final URL:", page.url());
 
   const games = await page.evaluate(() => {
     const items = [];
@@ -66,7 +85,7 @@ async function run() {
 
       if (tiers.length === 0) continue;
 
-      // Keep ONLY the highest prize tier per game
+      // Keep ONLY the single highest prize tier per game
       tiers.sort((a, b) => b.prize - a.prize);
       const topTier = tiers[0];
 
@@ -102,6 +121,11 @@ async function run() {
       return true;
     });
   });
+
+  if (games.length === 0) {
+    const bodyPreview = await page.evaluate(() => (document.body?.innerText || "").slice(0, 1200));
+    console.log("0 games extracted. Page text preview:\n", bodyPreview);
+  }
 
   await browser.close();
 
