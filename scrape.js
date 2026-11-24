@@ -38,98 +38,61 @@ async function run() {
   console.log("Opening Michigan Lottery page...");
   await page.goto(TARGET_URL, { waitUntil: "domcontentloaded", timeout: 90000 });
 
-  // Give JavaScript time to render the table instead of waiting for networkidle
-  await page.waitForSelector("table, [class*='game'], [class*='prize']", { timeout: 25000 }).catch(() => {
-    console.log("Did not immediately see table/game/prize elements; waiting a few more seconds.");
-  });
-  await page.waitForTimeout(5000);
+  await page.waitForSelector("table tr", { timeout: 30000 });
+  await page.waitForTimeout(3000);
 
-  console.log("Page title:", await page.title());
-  console.log("Final URL:", page.url());
+  const gamesMapObj = await page.evaluate(() => {
+    const byGame = {};
+    const rows = Array.from(document.querySelectorAll("table tr"));
 
-  const games = await page.evaluate(() => {
-    const items = [];
-    const tables = Array.from(document.querySelectorAll("table"));
+    for (const row of rows) {
+      const cells = Array.from(row.querySelectorAll("td")).map(c => c.innerText.trim());
+      // Expected columns: [Game, Ticket Price, Prize, Remaining, Starting, % Remaining]
+      if (cells.length < 5) continue;
 
-    for (const table of tables) {
-      const container =
-        table.closest("article, section, [class*='card'], [class*='game'], [class*='accordion']") ||
-        table.parentElement;
-      const containerText = container ? container.innerText : "";
-      const lines = containerText.split("\n").map(l => l.trim()).filter(Boolean);
+      const gameName = cells[0];
+      const priceText = cells[1];
+      const prizeText = cells[2];
+      const remText = cells[3];
+      const startText = cells[4];
 
-      const numMatch = containerText.match(/Game\s*(?:Number|#)\s*:?\s*(\d+)/i);
-      const priceMatch = containerText.match(/(?:Price\s*:?\s*)?\$(\d+(?:\.\d{2})?)/i);
+      const prizeVal = Number(prizeText.replace(/[^0-9.]/g, ""));
+      const remVal = parseInt(remText.replace(/[^0-9]/g, ""), 10);
+      const startVal = parseInt(startText.replace(/[^0-9]/g, ""), 10);
+      const priceVal = Number(priceText.replace(/[^0-9.]/g, ""));
 
-      const tiers = [];
-      for (const row of Array.from(table.querySelectorAll("tr"))) {
-        const cells = Array.from(row.querySelectorAll("th, td")).map(c => c.innerText.trim());
-        if (cells.length < 2) continue;
-        if (/total/i.test(cells.join(" "))) continue;
+      if (!gameName || !Number.isFinite(prizeVal) || prizeVal <= 0) continue;
 
-        const prizeMatch = cells[0].match(/^\$?([\d,]+(?:\.\d{2})?)$/);
-        if (!prizeMatch) continue;
+      const key = `${gameName}__${priceVal}`;
+      if (!byGame[key]) {
+        byGame[key] = {
+          gameName,
+          gameNumber: "", // New table view does not show Game Number
+          price: Number.isFinite(priceVal) ? priceVal : 0,
+          topPrize: prizeVal,
+          topRemaining: Number.isFinite(remVal) ? remVal : 0,
+          topStart: Number.isFinite(startVal) ? startVal : 0,
+          totalRemaining: Number.isFinite(remVal) ? remVal : 0
+        };
+      } else {
+        // Add remaining prizes from lower tiers into totalRemaining
+        byGame[key].totalRemaining += Number.isFinite(remVal) ? remVal : 0;
 
-        const prizeVal = Number(prizeMatch[1].replace(/,/g, ""));
-        const remVal = Number((cells[1] || "0").replace(/,/g, ""));
-        const startVal = Number((cells[2] || "0").replace(/,/g, ""));
-
-        if (Number.isFinite(prizeVal) && prizeVal > 0) {
-          tiers.push({
-            prize: prizeVal,
-            remaining: Number.isFinite(remVal) ? remVal : 0,
-            start: Number.isFinite(startVal) ? startVal : 0
-          });
+        // Keep ONLY the highest prize tier as the top prize
+        if (prizeVal > byGame[key].topPrize) {
+          byGame[key].topPrize = prizeVal;
+          byGame[key].topRemaining = Number.isFinite(remVal) ? remVal : 0;
+          byGame[key].topStart = Number.isFinite(startVal) ? startVal : 0;
         }
       }
-
-      if (tiers.length === 0) continue;
-
-      // Keep ONLY the single highest prize tier per game
-      tiers.sort((a, b) => b.prize - a.prize);
-      const topTier = tiers[0];
-
-      const totalRowMatch = containerText.match(/TOTAL\s*:?\s*([\d,]+)/i);
-      const totalRemaining = totalRowMatch
-        ? Number(totalRowMatch[1].replace(/,/g, ""))
-        : tiers.reduce((sum, t) => sum + t.remaining, 0);
-
-      const gameName =
-        lines.find(
-          l =>
-            !/game\s*(number|#)|price|release|prize|remaining|start|total/i.test(l) &&
-            !/^\$/.test(l) &&
-            l.length > 1
-        ) || "";
-
-      items.push({
-        gameName,
-        gameNumber: numMatch ? numMatch[1] : "",
-        price: priceMatch ? priceMatch[1] : "",
-        topPrize: topTier.prize,
-        topRemaining: topTier.remaining,
-        topStart: topTier.start,
-        totalRemaining
-      });
     }
 
-    const seen = new Set();
-    return items.filter(item => {
-      const key = item.gameNumber || `${item.gameName}|${item.topPrize}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
+    return byGame;
   });
-
-  if (games.length === 0) {
-    const bodyPreview = await page.evaluate(() => (document.body?.innerText || "").slice(0, 1200));
-    console.log("0 games extracted. Page text preview:\n", bodyPreview);
-  }
 
   await browser.close();
 
-  const cleanGames = games.map(g => ({
+  const cleanGames = Object.values(gamesMapObj).map(g => ({
     gameName: String(g.gameName || "").trim(),
     gameNumber: String(g.gameNumber || "").trim(),
     price: parseMoney(g.price),
@@ -139,6 +102,9 @@ async function run() {
     totalRemaining: parseIntClean(g.totalRemaining)
   }));
 
+  console.log("Extracted top-prize games:", cleanGames.length);
+  console.log("Sample:", JSON.stringify(cleanGames.slice(0, 3), null, 2));
+
   const res = await fetch(WEBHOOK_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -146,7 +112,7 @@ async function run() {
   });
 
   const data = await res.json();
-  console.log("Extracted games:", cleanGames.length, "Webhook result:", data);
+  console.log("Webhook result:", data);
 }
 
 run().catch(err => {
