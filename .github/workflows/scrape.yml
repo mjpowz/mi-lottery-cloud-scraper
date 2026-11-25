@@ -1,9 +1,9 @@
-name: Daily MI Lottery Top-Prize Scraper
+name: Hourly MI Lottery Top-Prize Scraper
 
 on:
   schedule:
-    # Runs daily at 07:17 UTC (2:17 AM EST)
-    - cron: "17 7 * * *"
+    # Runs once every hour at minute :17 UTC
+    - cron: "43 * * * *"
   workflow_dispatch: {}
 
 jobs:
